@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#3a97c9" />
+    <meta
+      name="description"
+      content="BRAIN - Votre assistant IA personnel par Brain Gen Technology"
+    />
+    <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <title>BRAIN - Assistant IA</title>
+    <style>
+      /* Styles de chargement initial */
+      body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+        background-color: #f9fafb;
+        margin: 0;
+        padding: 0;
+      }
+      
+      .loading-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+      }
+      
+      .loading-logo {
+        font-size: 2.5rem;
+        font-weight: bold;
+        background: linear-gradient(to right, #3a97c9, #4c8edb);
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 1rem;
+      }
+      
+      .loading-dots {
+        display: flex;
+        gap: 0.5rem;
+      }
+      
+      .loading-dot {
+        width: 0.75rem;
+        height: 0.75rem;
+        background-color: #3a97c9;
+        border-radius: 50%;
+        animation: pulse 1.5s infinite ease-in-out;
+      }
+      
+      .loading-dot:nth-child(2) {
+        animation-delay: 0.2s;
+      }
+      
+      .loading-dot:nth-child(3) {
+        animation-delay: 0.4s;
+      }
+      
+      @keyframes pulse {
+        0%, 100% { transform: scale(0.3); opacity: 0.3; }
+        50% { transform: scale(1); opacity: 1; }
+      }
+      
+      @media (prefers-color-scheme: dark) {
+        body {
+          background-color: #0a1b1d;
+          color: #fff;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <noscript>Vous devez activer JavaScript pour utiliser cette application.</noscript>
+    <div id="root">
+      <!-- Écran de chargement initial -->
+      <div class="loading-container">
+        <div class="loading-logo">BRAIN</div>
+        <div class="loading-dots">
+          <div class="loading-dot"></div>
+          <div class="loading-dot"></div>
+          <div class="loading-dot"></div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
