@@ -1,0 +1,73 @@
+# Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
+# Configuration for MCP Trader Enhanced - Advanced financial analysis server
+
+startCommand:
+  type: stdio
+  configSchema:
+    # JSON Schema defining the configuration options for the MCP.
+    type: object
+    required:
+      - tiingoApiKey
+    properties:
+      tiingoApiKey:
+        type: string
+        title: "Tiingo API Key"
+        description: "API key for Tiingo financial data service. Get yours at https://tiingo.com"
+        pattern: "^[a-f0-9]{40}$"
+      alphaVantageApiKey:
+        type: string
+        title: "Alpha Vantage API Key (Optional)"
+        description: "API key for fundamental analysis. Get yours at https://alphavantage.co"
+        pattern: "^[A-Z0-9]{16}$"
+      newsApiKey:
+        type: string
+        title: "NewsAPI Key (Optional)"
+        description: "API key for news sentiment analysis. Get yours at https://newsapi.org"
+        pattern: "^[a-f0-9]{32}$"
+      enableFundamentalAnalysis:
+        type: boolean
+        title: "Enable Fundamental Analysis"
+        description: "Enable fundamental analysis features (requires Alpha Vantage API key)"
+        default: true
+      enableSentimentAnalysis:
+        type: boolean
+        title: "Enable Sentiment Analysis"
+        description: "Enable news sentiment analysis features (requires NewsAPI key)"
+        default: true
+      defaultRiskPercent:
+        type: number
+        title: "Default Risk Percentage"
+        description: "Default maximum risk percentage per trade"
+        default: 2.0
+        minimum: 0.1
+        maximum: 10.0
+      logLevel:
+        type: string
+        title: "Log Level"
+        description: "Logging level for the server"
+        enum: ["DEBUG", "INFO", "WARNING", "ERROR"]
+        default: "INFO"
+  commandFunction: |
+    (config) => {
+      const env = {
+        TIINGO_API_KEY: config.tiingoApiKey,
+        LOG_LEVEL: config.logLevel || 'INFO',
+        DEFAULT_MAX_RISK_PERCENT: (config.defaultRiskPercent || 2.0).toString(),
+        ENABLE_FUNDAMENTAL_ANALYSIS: (config.enableFundamentalAnalysis !== false).toString(),
+        ENABLE_SENTIMENT_ANALYSIS: (config.enableSentimentAnalysis !== false).toString()
+      };
+      
+      if (config.alphaVantageApiKey) {
+        env.ALPHA_VANTAGE_API_KEY = config.alphaVantageApiKey;
+      }
+      
+      if (config.newsApiKey) {
+        env.NEWS_API_KEY = config.newsApiKey;
+      }
+      
+      return {
+        command: 'uv',
+        args: ['run', 'mcp-trader'],
+        env: env
+      };
+    }
