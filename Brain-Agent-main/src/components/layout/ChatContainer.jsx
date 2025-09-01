@@ -76,44 +76,35 @@ const ChatContainer = ({ onOpenSidebar, onToggleSidebar, isSidebarVisible }) => 
     'USDJPY': 'FX:USDJPY'
   };
 
-  // Fonction améliorée pour détecter les symboles dans le DERNIER message uniquement
-  const detectSymbolInLastMessage = useCallback(() => {
-    if (!activeConversation || !activeConversation.messages.length) return null;
-    
-    // Prendre SEULEMENT le dernier message utilisateur
-    const messages = activeConversation.messages;
-    const lastUserMessage = [...messages].reverse().find(msg => msg.role === 'user');
-    
-    if (!lastUserMessage) return null;
-
-    console.log('🔍 Analysing last user message:', lastUserMessage.content);
-    
-    const upperContent = lastUserMessage.content.toUpperCase();
-    
-    // Chercher les symboles dans le dernier message
-    for (const [ticker, tvSymbol] of Object.entries(SYMBOL_MAPPING)) {
-      if (upperContent.includes(ticker)) {
-        const detected = { ticker, symbol: tvSymbol };
-        console.log('✅ Symbol detected:', detected);
-        return detected;
-      }
-    }
-    
-    console.log('❌ No symbol detected in last message');
-    return null;
-  }, [activeConversation?.messages, SYMBOL_MAPPING]);
+  
 
   // Effet pour détecter automatiquement les symboles - DÉCLENCHÉ SEULEMENT SUR NOUVEAU MESSAGE
-  useEffect(() => {
-    if (!activeConversation?.messages?.length) return;
-    
-    const detectedSymbol = detectSymbolInLastMessage();
-    if (detectedSymbol) {
-      console.log('🎯 Updating chart to:', detectedSymbol);
-      setCurrentSymbol(detectedSymbol);
+ useEffect(() => {
+  if (!activeConversation?.messages?.length) return;
+  
+  // Prendre SEULEMENT le dernier message utilisateur
+  const messages = activeConversation.messages;
+  const lastUserMessage = [...messages].reverse().find(msg => msg.role === 'user');
+  
+  if (!lastUserMessage) return;
+
+  //console.log('🔍 Analysing last user message:', lastUserMessage.content);
+  
+  const upperContent = lastUserMessage.content.toUpperCase();
+  
+  // Chercher les symboles dans le dernier message
+  for (const [ticker, tvSymbol] of Object.entries(SYMBOL_MAPPING)) {
+    if (upperContent.includes(ticker)) {
+      const detected = { ticker, symbol: tvSymbol };
+      //console.log('✅ Symbol detected:', detected);
+      setCurrentSymbol(detected);
       setShowChart(true);
+      return; // Arrêter après le premier symbole trouvé
     }
-  }, [activeConversation?.messages?.length, detectSymbolInLastMessage]); // Dépendance sur la LONGUEUR pour éviter les updates inutiles
+  }
+  
+  //console.log('❌ No symbol detected in last message');
+}, [activeConversation?.messages?.length]); // Dépendance sur la LONGUEUR pour éviter les updates inutiles
 
   const intervals = [
     { value: "1", label: "1m" },

@@ -1,417 +1,492 @@
 /**
- * Service pour gérer les connexions aux différentes APIs de modèles de langage
- * via notre serveur proxy pour éviter les problèmes CORS
- * MODIFIÉ : Intégration avec MCP-Trader
+ * Service LLM sécurisé pour BRAIN Trading Assistant
+ * Communique avec le backend sécurisé - AUCUNE CLÉ API EXPOSÉE
  */
 
-const PROXY_URL = 'http://localhost:3001';
-
-// Configuration des clés d'API et des points d'accès
-const API_CONFIG = {
-  OPENAI: {
-    apiKey: process.env.REACT_APP_OPENAI_API_KEY,
-    endpoint: `${PROXY_URL}/api/openai`,
-    models: ['gpt-4o-mini', 'gpt-3.5-turbo'],
-    priority: 2
-    
-  },
-  ANTHROPIC: {
-    apiKey: process.env.REACT_APP_OPENAI_API_KEY,
-    endpoint: `${PROXY_URL}/api/anthropic`,
-    models: ['claude-3-opus-20240229', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307'],
-    priority: 1,
-    hasCredits: false
-  },
-  GEMINI: {
-    apiKey: '',
-    endpoint: 'https://generativelanguage.googleapis.com/v1beta/models',
-    models: ['gemini-pro', 'gemini-ultra'],
-    priority: 3
-  }
-};
-// Validation des clés API au démarrage
-const validateAPIKeys = () => {
-  const missingKeys = [];
-  
-  if (!API_CONFIG.OPENAI.apiKey) {
-    missingKeys.push('REACT_APP_OPENAI_API_KEY');
-  }
-  
-  if (!API_CONFIG.ANTHROPIC.apiKey) {
-    missingKeys.push('REACT_APP_ANTHROPIC_API_KEY');
-  }
-  
-  if (missingKeys.length > 0) {
-    console.error('Clés API manquantes:', missingKeys);
-    console.error('Vérifiez votre fichier .env.local');
-  }
-  
-  return missingKeys.length === 0;
+// Configuration - Seulement des URLs publiques
+const CONFIG = {
+  API_URL: process.env.REACT_APP_API_URL || 'http://localhost:3001',
+  TIMEOUT: 30000,
+  MAX_RETRIES: 2,
+  CACHE_DURATION: 5 * 60 * 1000, // 5 minutes
+  MAX_CACHE_SIZE: 100
 };
 
-// Appelez la validation au chargement du module
-validateAPIKeys();
-//Système de fallback intelligent
-const FALLBACK_ORDER = ['OPENAI', 'ANTHROPIC', 'GEMINI'].filter(provider => 
-  API_CONFIG[provider].apiKey && API_CONFIG[provider].apiKey.length > 10
-);
-
-// FONCTIONS MCP
-// Détecter les requêtes de trading
-const isCreditsError = (error) => {
-  const errorStr = JSON.stringify(error).toLowerCase();
-  return errorStr.includes('credit') || 
-         errorStr.includes('balance') || 
-         errorStr.includes('billing') ||
-         errorStr.includes('quota');
-};
-
-// Détecter les erreurs de rate limit
-const isRateLimitError = (error) => {
-  const errorStr = JSON.stringify(error).toLowerCase();
-  return errorStr.includes('429') || 
-         errorStr.includes('rate') || 
-         errorStr.includes('limit');
-};
-
-// AMÉLIORATION : Appel avec fallback automatique
-const callLLMWithAutoFallback = async (message, preferredProvider = null, preferredModel = null) => {
-  console.log(`🧠 BRAIN: Starting smart LLM call with fallback...`);
-  
-  // Ordonner les providers selon préférence
-  let providersToTry = [...FALLBACK_ORDER];
-  if (preferredProvider && FALLBACK_ORDER.includes(preferredProvider)) {
-    // Mettre le provider préféré en premier
-    providersToTry = [preferredProvider, ...FALLBACK_ORDER.filter(p => p !== preferredProvider)];
+// Cache simple pour les réponses
+class ResponseCache {
+  constructor() {
+    this.cache = new Map();
   }
 
-  const errors = [];
-  
-  for (let i = 0; i < providersToTry.length; i++) {
-    const provider = providersToTry[i];
-    const config = API_CONFIG[provider];
-    
-    // Skip si pas de crédit détecté précédemment
-    if (config.hasCredits === false && provider === 'ANTHROPIC') {
-      console.log(`⚠️ Skipping ${provider} - no credits detected`);
-      continue;
+  // Générer une clé de cache basée sur le message
+  generateKey(message, provider, model) {
+    const hash = this.simpleHash(message + provider + model);
+    return `${provider}:${model}:${hash}`;
+  }
+
+  // Hash simple pour la clé de cache
+  simpleHash(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convertir en entier 32 bits
     }
-
-    try {
-      console.log(`🔄 Trying ${provider} (attempt ${i + 1}/${providersToTry.length})`);
-      
-      let model = preferredModel;
-      if (!model || !config.models.includes(model)) {
-        model = config.models[0]; // Prendre le premier modèle disponible
-      }
-
-      const response = await callSelectedLLM(message, provider, model);
-      
-      // Marquer comme fonctionnel
-      if (provider === 'ANTHROPIC') {
-        config.hasCredits = true;
-      }
-      
-      console.log(`✅ Success with ${provider}/${model}`);
-      return {
-        response,
-        provider,
-        model,
-        fallbackUsed: i > 0
-      };
-
-    } catch (error) {
-      console.error(`❌ ${provider} failed:`, error.message);
-      errors.push({ provider, error: error.message });
-      
-      // Marquer Anthropic comme sans crédit si erreur de facturation
-      if (provider === 'ANTHROPIC' && isCreditsError(error)) {
-        console.log(`💳 Marking ${provider} as no credits`);
-        config.hasCredits = false;
-      }
-      
-      // Attendre un peu avant le prochain essai si rate limit
-      if (isRateLimitError(error) && i < providersToTry.length - 1) {
-        console.log(`⏳ Rate limit detected, waiting 2s before next provider...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-      
-      continue;
-    }
+    return Math.abs(hash).toString(36);
   }
 
-  // Tous les providers ont échoué
-  const errorSummary = errors.map(e => `${e.provider}: ${e.error}`).join('\n');
-  throw new Error(`All LLM providers failed:\n${errorSummary}`);
-};
-const isTradingQuery = (message) => {
-  const tradingKeywords = [
-    'analys', 'analyse', 'action', 'stock', 'crypto', 'bitcoin', 'ethereum',
-    'recommand', 'conseil', 'investir', 'acheter', 'vendre', 'marché', 'trading',
-    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'BTC', 'ETH'
-  ];
-  return tradingKeywords.some(keyword => 
-    message.toLowerCase().includes(keyword.toLowerCase())
-  );
-};
+  // Récupérer du cache
+  get(key) {
+    const item = this.cache.get(key);
+    if (!item) return null;
 
-// Extraire symboles boursiers
-const extractSymbols = (message) => {
-  const symbols = message.match(/\b[A-Z]{1,5}\b/g) || [];
-  return symbols.filter(s => s.length <= 5);
-};
-
-// Appeler MCP pour analyse
-const callMCPAnalysis = async (message) => {
-  const symbols = extractSymbols(message);
-  if (symbols.length === 0) return null;
-  
-  try {
-    console.log(`📊 Appel MCP pour ${symbols[0]}`);
-    const response = await fetch('http://localhost:3001/api/mcp/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol: symbols[0] })
-    });
-    
-    const data = await response.json();
-    if (data.success) {
-      return `📊 **Analyse de ${data.symbol}**\n\n${data.data}`;
-    } else {
-      console.error('Erreur MCP:', data.error);
+    // Vérifier l'expiration
+    if (Date.now() - item.timestamp > CONFIG.CACHE_DURATION) {
+      this.cache.delete(key);
       return null;
     }
-  } catch (error) {
-    console.error('Erreur MCP:', error);
-    return null;
+
+    return item.data;
   }
-};
 
-/**
- * Envoie une requête à l'API OpenAI via notre proxy
- */
-const callOpenAI = async (message, model = 'gpt-4o-mini') => {
-  try {
-    console.log(`Calling OpenAI API with model ${model}...`);
-    
-    const response = await fetch(API_CONFIG.OPENAI.endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${API_CONFIG.OPENAI.apiKey}`
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: [{ role: 'user', content: message }],
-        temperature: 0.7,
-        max_tokens: 2000
-      })
-    });
-
-     const data = await response.json();
-    
-    if (!response.ok) {
-      throw new Error(data.error?.message || `OpenAI API error: ${response.status}`);
+  // Stocker en cache avec nettoyage automatique
+  set(key, data) {
+    // Nettoyer le cache si trop plein
+    if (this.cache.size >= CONFIG.MAX_CACHE_SIZE) {
+      const oldestKey = this.cache.keys().next().value;
+      this.cache.delete(oldestKey);
     }
-    
-    return data.choices[0].message.content;
-  } catch (error) {
-    console.error('Erreur OpenAI:', error);
-    throw error;
+
+    this.cache.set(key, {
+      data,
+      timestamp: Date.now()
+    });
   }
-};
 
-
-/**
- * Envoie une requête à l'API Anthropic (Claude) via notre proxy
- */
-const callAnthropic = async (message, model = 'claude-3-haiku-20240307') => {
-  try {
-    console.log(`Calling Anthropic API with model ${model}...`);
-    
-    const requestBody = {
-      model: model,
-      messages: [{ role: 'user', content: message }],
-      max_tokens: 1000,
-      temperature: 0.7,
-      system: "Vous êtes BRAIN, un assistant IA spécialisé en finance et trading, utile et professionnel."
+  // Statistiques du cache
+  getStats() {
+    return {
+      size: this.cache.size,
+      maxSize: CONFIG.MAX_CACHE_SIZE,
+      hitRate: this.hitCount / (this.hitCount + this.missCount) * 100 || 0
     };
-    
-    const response = await fetch(API_CONFIG.ANTHROPIC.endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': API_CONFIG.ANTHROPIC.apiKey
-      },
-      body: JSON.stringify(requestBody)
-    });
-    
-    const data = await response.json();
-    
-    if (!response.ok) {
-      throw new Error(data.error?.message || `Erreur API Anthropic: ${JSON.stringify(data.error)}`);
-    }
-    
-    const textContent = data.content.find(item => item.type === 'text');
-    if (!textContent || !textContent.text) {
-      throw new Error('Pas de contenu textuel dans la réponse');
-    }
-    
-    return textContent.text;
-  } catch (error) {
-    console.error('Erreur Anthropic:', error);
-    throw error;
   }
-};
 
-/**
- * Envoie une requête à l'API Gemini de Google
- */
-const callGemini = async (message, model = 'gemini-pro') => {
-  try {
-    const response = await fetch(`${API_CONFIG.GEMINI.endpoint}/${model}:generateContent?key=${API_CONFIG.GEMINI.apiKey}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: message }] }],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 1000
+  clear() {
+    this.cache.clear();
+    this.hitCount = 0;
+    this.missCount = 0;
+  }
+}
+
+// Instance globale du cache
+const cache = new ResponseCache();
+
+// Classe d'erreur personnalisée
+class LLMError extends Error {
+  constructor(message, type, status, provider) {
+    super(message);
+    this.name = 'LLMError';
+    this.type = type;
+    this.status = status;
+    this.provider = provider;
+    this.timestamp = new Date().toISOString();
+  }
+}
+
+// Service principal
+class LLMService {
+  constructor() {
+    this.requestCount = 0;
+    this.errorCount = 0;
+    this.lastErrorTime = null;
+  }
+
+  /**
+   * Méthode principale pour générer des réponses
+   * @param {string} message - Le message à envoyer
+   * @param {object} options - Options de configuration
+   * @returns {Promise<object>} - Réponse du LLM
+   */
+  async generateResponse(message, options = {}) {
+    const {
+      provider = 'openai',
+      model,
+      temperature = 0.7,
+      maxTokens,
+      useCache = true
+    } = options;
+
+    // Validation des entrées
+    this.validateInput(message, provider);
+
+    // Modèle par défaut selon le provider
+    const selectedModel = model || (provider === 'openai' ? 'gpt-4o-mini' : 'claude-3-haiku-20240307');
+
+    // Vérifier le cache d'abord
+    if (useCache) {
+      const cacheKey = cache.generateKey(message, provider, selectedModel);
+      const cachedResponse = cache.get(cacheKey);
+      
+      if (cachedResponse) {
+        console.log('[Cache] Réponse trouvée en cache');
+        return {
+          ...cachedResponse,
+          fromCache: true,
+          cacheKey
+        };
+      }
+    }
+
+    // Préparer les données de la requête
+    const requestData = {
+      messages: [{ role: 'user', content: message }],
+      model: selectedModel,
+      temperature,
+      ...(maxTokens && { max_tokens: maxTokens })
+    };
+
+    try {
+      this.requestCount++;
+      console.log(`[${provider}] Envoi requête - ${selectedModel}`);
+
+      const response = await this.makeSecureRequest(provider, requestData);
+      
+      const result = {
+        content: this.extractContent(response, provider),
+        provider,
+        model: selectedModel,
+        usage: response.usage || null,
+        timestamp: new Date().toISOString(),
+        fromCache: false
+      };
+
+      // Mettre en cache si demandé et pas d'erreur
+      if (useCache && result.content) {
+        const cacheKey = cache.generateKey(message, provider, selectedModel);
+        cache.set(cacheKey, result);
+      }
+
+      console.log(`[${provider}] Succès - ${result.content.length} caractères`);
+      return result;
+
+    } catch (error) {
+      this.errorCount++;
+      this.lastErrorTime = new Date().toISOString();
+      
+      console.error(`[${provider}] Erreur:`, error.message);
+
+      // Tentative de fallback automatique
+      if (provider === 'openai' && options.allowFallback !== false) {
+        console.log('[Fallback] Tentative avec Anthropic...');
+        try {
+          return await this.generateResponse(message, {
+            ...options,
+            provider: 'anthropic',
+            allowFallback: false // Éviter la boucle infinie
+          });
+        } catch (fallbackError) {
+          console.error('[Fallback] Échec:', fallbackError.message);
+          // Lancer l'erreur originale, pas celle du fallback
         }
-      })
-    });
+      }
 
-    const data = await response.json();
-    
-    if (!response.ok) {
-      throw new Error(data.error?.message || 'Erreur lors de l\'appel à l\'API Gemini');
-    }
-    
-    return data.candidates[0].content.parts[0].text;
-  } catch (error) {
-    console.error('Erreur Gemini:', error);
-    throw error;
-  }
-};
-
-/**
- * Fonction helper pour appeler le LLM sélectionné
- */
-const callSelectedLLM = async (message, provider, model) => {
-  // Vérifier le serveur proxy
-  if (provider === 'OPENAI' || provider === 'ANTHROPIC') {
-    const isProxyRunning = await checkProxyServer().catch(() => false);
-    if (!isProxyRunning) {
-      throw new Error('Le serveur proxy n\'est pas en cours d\'exécution.');
+      throw error;
     }
   }
-  
-  switch (provider) {
-    case 'OPENAI':
-      return await callOpenAI(message, model);
-    case 'ANTHROPIC':
-      return await callAnthropic(message, model);
-    case 'GEMINI':
-      return await callGemini(message, model);
-    default:
-      throw new Error('Fournisseur de modèle non pris en charge');
-  }
-};
 
-/**
- * Vérifie si le serveur proxy est en cours d'exécution
- */
-export const checkProxyServer = async () => {
-  try {
-    const response = await fetch(`${PROXY_URL}/api/health`);
-    const data = await response.json();
-    return data.status === 'ok';
-  } catch (error) {
-    console.error('Erreur lors de la vérification du serveur proxy:', error);
+  /**
+   * Faire une requête sécurisée au backend
+   */
+  async makeSecureRequest(provider, data, retryCount = 0) {
+    const url = `${CONFIG.API_URL}/api/${provider}`;
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(data),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new LLMError(
+          errorData.error?.message || `Erreur HTTP ${response.status}`,
+          errorData.error?.type || 'api_error',
+          response.status,
+          provider
+        );
+      }
+
+      return await response.json();
+
+    } catch (error) {
+      clearTimeout(timeoutId);
+
+      // Gestion des différents types d'erreurs
+      if (error.name === 'AbortError') {
+        throw new LLMError('Timeout de la requête', 'timeout_error', 408, provider);
+      }
+
+      if (error instanceof LLMError) {
+        // Retry automatique pour certaines erreurs
+        if (this.shouldRetry(error) && retryCount < CONFIG.MAX_RETRIES) {
+          const delay = Math.pow(2, retryCount) * 1000; // Backoff exponentiel
+          console.log(`[${provider}] Retry ${retryCount + 1} dans ${delay}ms...`);
+          
+          await this.sleep(delay);
+          return this.makeSecureRequest(provider, data, retryCount + 1);
+        }
+        throw error;
+      }
+
+      // Erreur réseau générique
+      throw new LLMError('Erreur de connexion au serveur', 'network_error', 0, provider);
+    }
+  }
+
+  /**
+   * Extraire le contenu de la réponse selon le provider
+   */
+  extractContent(response, provider) {
+    switch (provider) {
+      case 'openai':
+        return response.choices?.[0]?.message?.content || '';
+        
+      case 'anthropic':
+        const textContent = response.content?.find(item => item.type === 'text');
+        return textContent?.text || '';
+        
+      default:
+        return response.text || JSON.stringify(response);
+    }
+  }
+
+  /**
+   * Valider les entrées
+   */
+  validateInput(message, provider) {
+    if (!message || typeof message !== 'string') {
+      throw new LLMError('Message requis (string)', 'validation_error', 400);
+    }
+
+    if (message.length === 0) {
+      throw new LLMError('Message ne peut pas être vide', 'validation_error', 400);
+    }
+
+    if (message.length > 10000) {
+      throw new LLMError('Message trop long (max 10000 caractères)', 'validation_error', 400);
+    }
+
+    if (!['openai', 'anthropic'].includes(provider)) {
+      throw new LLMError('Provider non supporté', 'validation_error', 400);
+    }
+  }
+
+  /**
+   * Déterminer si on doit retry une requête
+   */
+  shouldRetry(error) {
+    // Pas de retry pour les erreurs d'authentification ou de validation
+    if (error.status === 401 || error.status === 400) return false;
+    
+    // Retry pour les erreurs de rate limit et serveur
+    if (error.status === 429 || error.status >= 500) return true;
+    
+    // Retry pour les erreurs réseau
+    if (error.type === 'network_error' || error.type === 'timeout_error') return true;
+    
     return false;
   }
-};
 
-// Mode démo MCP (quand l'API ne répond pas)
-const getMockMCPAnalysis = (symbol) => {
-  return `📊 **Analyse technique de ${symbol}** (Mode démo MCP-Trader)
+  /**
+   * Utilitaire pour attendre
+   */
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
 
-**Tendance générale** : Haussière à court terme
-**RSI (14)** : 65.4 (Zone neutre-surachat) 
-**MACD** : Signal d'achat récent
-**Bollinger Bands** : Prix proche de la bande supérieure
-**Volume** : Supérieur à la moyenne mobile 20 jours
+  /**
+   * Méthodes de convenance pour les providers spécifiques
+   */
+  async askOpenAI(message, model = 'gpt-4o-mini', options = {}) {
+    return this.generateResponse(message, { ...options, provider: 'openai', model });
+  }
 
-**Support/Résistance** :
-- Support clé : $150.00
-- Résistance : $185.00
-- Prix actuel : ~$175.00
+  async askAnthropic(message, model = 'claude-3-haiku-20240307', options = {}) {
+    return this.generateResponse(message, { ...options, provider: 'anthropic', model });
+  }
 
-**Recommandation** : Position modérément haussière avec prise de profit partielle si dépassement de $180.
+  /**
+   * Vérifier la santé du service backend
+   */
+  async checkHealth() {
+    try {
+      const response = await fetch(`${CONFIG.API_URL}/api/health`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000) // Timeout court pour health check
+      });
 
-*Analyse générée par MCP-Trader - Version démo*`;
-};
-
-/**
- * FONCTION PRINCIPALE MODIFIÉE
- * Gère les requêtes de trading avec MCP et les requêtes normales avec LLM
- */
-export const generateResponse = async (message, provider, model) => {
-  console.log(`🧠 BRAIN: Traitement du message avec ${provider}/${model}`);
-  
-  // 1. Vérifier si c'est une requête de trading
-  if (isTradingQuery(message)) {
-    console.log('📊 Requête de trading détectée');
-    
-    const mcpResult = await callMCPAnalysis(message);
-    if (mcpResult) {
-      // Enrichir avec le LLM pour une meilleure présentation
-      const enrichedPrompt = `Tu es BRAIN, un assistant de trading professionnel. 
-
-Analyse MCP-Trader :
-${mcpResult}
-
-INSTRUCTIONS SPÉCIALES POUR GEMINI :
-- Utilise un format markdown structuré
-- Ajoute des sections claires (## Titre)
-- Inclus des conseils pratiques
-- Sois professionnel mais accessible
-- Évite les émojis excessifs`;
-      
-      try {
-        console.log('✨ Enrichissement avec le LLM');
-        const llmResponse = await callSelectedLLM(enrichedPrompt, provider, model);
-        return llmResponse;
-      } catch (error) {
-        console.log('⚠️ Échec enrichissement LLM, retour analyse brute');
-        return mcpResult;
+      if (!response.ok) {
+        throw new Error(`Health check failed: ${response.status}`);
       }
-    } else {
-      console.log('❌ Aucune donnée MCP, traitement normal');
+
+      const data = await response.json();
+      return {
+        healthy: true,
+        ...data,
+        frontend: {
+          cacheStats: cache.getStats(),
+          requestCount: this.requestCount,
+          errorCount: this.errorCount,
+          lastErrorTime: this.lastErrorTime
+        }
+      };
+    } catch (error) {
+      return {
+        healthy: false,
+        error: error.message,
+        frontend: {
+          cacheStats: cache.getStats(),
+          requestCount: this.requestCount,
+          errorCount: this.errorCount,
+          lastErrorTime: this.lastErrorTime
+        }
+      };
     }
   }
-  
-  // 2. Traitement normal avec LLM
-  console.log('💭 Traitement normal avec LLM');
-  return await callSelectedLLM(message, provider, model);
+
+  /**
+   * Obtenir les statistiques du service
+   */
+  getStats() {
+    return {
+      requests: this.requestCount,
+      errors: this.errorCount,
+      errorRate: this.requestCount > 0 ? (this.errorCount / this.requestCount * 100).toFixed(2) + '%' : '0%',
+      lastErrorTime: this.lastErrorTime,
+      cache: cache.getStats(),
+      config: {
+        apiUrl: CONFIG.API_URL,
+        timeout: CONFIG.TIMEOUT,
+        maxRetries: CONFIG.MAX_RETRIES
+      }
+    };
+  }
+
+  /**
+   * Réinitialiser les statistiques
+   */
+  resetStats() {
+    this.requestCount = 0;
+    this.errorCount = 0;
+    this.lastErrorTime = null;
+    cache.clear();
+  }
+
+  /**
+   * Tester la connectivité avec différents providers
+   */
+  async testConnectivity() {
+    const results = {
+      backend: null,
+      openai: null,
+      anthropic: null,
+      timestamp: new Date().toISOString()
+    };
+
+    try {
+      // Test du backend
+      const healthCheck = await this.checkHealth();
+      results.backend = {
+        status: healthCheck.healthy ? 'OK' : 'ERREUR',
+        details: healthCheck
+      };
+
+      // Test OpenAI avec un message court
+      try {
+        const openaiTest = await this.generateResponse('Test de connectivité', {
+          provider: 'openai',
+          useCache: false,
+          maxTokens: 10
+        });
+        results.openai = {
+          status: 'OK',
+          responseLength: openaiTest.content.length,
+          model: openaiTest.model
+        };
+      } catch (error) {
+        results.openai = {
+          status: 'ERREUR',
+          error: error.message,
+          type: error.type
+        };
+      }
+
+      // Test Anthropic avec un message court
+      try {
+        const anthropicTest = await this.generateResponse('Test de connectivité', {
+          provider: 'anthropic',
+          useCache: false,
+          maxTokens: 10
+        });
+        results.anthropic = {
+          status: 'OK',
+          responseLength: anthropicTest.content.length,
+          model: anthropicTest.model
+        };
+      } catch (error) {
+        results.anthropic = {
+          status: 'ERREUR',
+          error: error.message,
+          type: error.type
+        };
+      }
+
+    } catch (error) {
+      results.backend = {
+        status: 'ERREUR',
+        error: error.message
+      };
+    }
+
+    return results;
+  }
+}
+
+// Instance singleton du service
+const llmService = new LLMService();
+
+// Fonctions d'aide pour compatibilité avec l'ancien code
+export const generateResponse = async (message, provider = 'openai', model) => {
+  return llmService.generateResponse(message, { provider, model });
 };
 
-/**
- * Récupère la liste de tous les modèles disponibles
- */
+export const checkProxyServer = async () => {
+  const health = await llmService.checkHealth();
+  return health.healthy;
+};
+
 export const getAvailableModels = () => {
   return {
-    OPENAI: API_CONFIG.OPENAI.models,
-    ANTHROPIC: API_CONFIG.ANTHROPIC.models,
-    GEMINI: API_CONFIG.GEMINI.models
+    OPENAI: ['gpt-4o-mini', 'gpt-3.5-turbo'],
+    ANTHROPIC: ['claude-3-haiku-20240307', 'claude-3-sonnet-20240229']
   };
 };
 
-/**
- * Vérifie si la clé API pour un fournisseur donné est configurée
- */
-export const isProviderConfigured = (provider) => {
-  return !!API_CONFIG[provider].apiKey;
+export const isProviderConfigured = async (provider) => {
+  const health = await llmService.checkHealth();
+  return health.services?.[provider] || false;
 };
+
+// Exports principaux
+export default llmService;
+export { LLMError, CONFIG as LLM_CONFIG };
